@@ -1,0 +1,18 @@
+# Redactions applied during skill build
+
+This file lists every value the translator scrubbed from the recording before
+sending it to Claude. Review before installing the skill.
+
+{% if log.redactions %}
+| Event | Placeholder | Kind | Original length |
+|---|---|---|---|
+{% for r in log.redactions -%}
+| `{{ r.event_id }}` | `{{ r.placeholder }}` | {{ r.kind }} | {{ r.original_length }} |
+{% endfor %}
+{% else %}
+_No redactions were applied._
+{% endif %}
+
+If a placeholder above looks like it should not have been redacted (false positive),
+edit the source recording at `reference/original_recording.json` and run
+`csrsb build` again with `--allow-pii` if you accept the risk.

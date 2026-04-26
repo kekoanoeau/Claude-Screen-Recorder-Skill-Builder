@@ -1,0 +1,69 @@
+{
+  "version": "1.0",
+  "surface": "desktop",
+  "started_at": "2026-04-26T10:00:00Z",
+  "ended_at": "2026-04-26T10:00:14Z",
+  "metadata": {
+    "os": "Linux 6.18.5",
+    "user_intent_hint": "open the Calculator app and compute 2+2"
+  },
+  "events": [
+    {
+      "id": "evt_0001",
+      "ts_ms": 1714125600000,
+      "surface": "desktop",
+      "type": "click",
+      "value": {"x": 50, "y": 1000, "button": "left"},
+      "screenshot_path": "screenshots/1.png",
+      "viewport": {"w": 1920, "h": 1080, "dpr": 1.0, "zoom": 1.0}
+    },
+    {
+      "id": "evt_0002",
+      "ts_ms": 1714125601000,
+      "surface": "desktop",
+      "type": "input",
+      "value": "calculator"
+    },
+    {
+      "id": "evt_0003",
+      "ts_ms": 1714125602000,
+      "surface": "desktop",
+      "type": "key",
+      "value": {"key": "enter", "action": "press"}
+    },
+    {
+      "id": "evt_0004",
+      "ts_ms": 1714125604500,
+      "surface": "desktop",
+      "type": "click",
+      "value": {"x": 600, "y": 500, "button": "left"},
+      "screenshot_path": "screenshots/2.png",
+      "viewport": {"w": 1920, "h": 1080, "dpr": 1.0, "zoom": 1.0}
+    },
+    {
+      "id": "evt_0005",
+      "ts_ms": 1714125605200,
+      "surface": "desktop",
+      "type": "click",
+      "value": {"x": 700, "y": 500, "button": "left"},
+      "screenshot_path": "screenshots/3.png"
+    },
+    {
+      "id": "evt_0006",
+      "ts_ms": 1714125606000,
+      "surface": "desktop",
+      "type": "click",
+      "value": {"x": 600, "y": 500, "button": "left"},
+      "screenshot_path": "screenshots/4.png"
+    },
+    {
+      "id": "evt_0007",
+      "ts_ms": 1714125606800,
+      "surface": "desktop",
+      "type": "click",
+      "value": {"x": 800, "y": 600, "button": "left"},
+      "screenshot_path": "screenshots/5.png"
+    }
+  ],
+  "notes": []
+}

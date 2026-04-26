@@ -1,0 +1,62 @@
+---
+name: {{ draft.name }}
+description: {{ draft.description | replace('\n', ' ') | trim }}
+---
+
+# {{ draft.title }}
+
+## When to use this skill
+{% for bullet in draft.when_to_use -%}
+- {{ bullet }}
+{% endfor %}
+{% if draft.prerequisites %}
+## Prerequisites
+{% for bullet in draft.prerequisites -%}
+- {{ bullet }}
+{% endfor %}
+{% endif -%}
+{% if draft.inputs %}
+## Inputs
+Ask the user for these before starting:
+{% for bullet in draft.inputs -%}
+- {{ bullet }}
+{% endfor %}
+{% endif -%}
+
+## High-level approach
+{{ draft.high_level_approach }}
+
+## Steps
+{% for step in draft.steps %}
+### {{ loop.index }}. {{ step.title }}
+
+**Goal:** {{ step.goal }}
+
+**Action:** {{ step.action }}
+
+**Expected result:** {{ step.expected_result }}
+{% if step.fallback %}
+**If it fails:** {{ step.fallback }}
+{% endif -%}
+{% if step.screenshot_path %}
+**Reference:** ![](reference/{{ step.screenshot_path }})
+{% endif %}
+{% endfor %}
+
+## Success criteria
+{% for bullet in draft.success_criteria -%}
+- {{ bullet }}
+{% endfor %}
+{% if draft.failure_modes %}
+## Common failure modes
+{% for bullet in draft.failure_modes -%}
+- {{ bullet }}
+{% endfor %}
+{% endif %}
+## Reference materials
+- `reference/original_recording.json` — the captured workflow
+- `reference/screenshots/` — frames from the recording
+- `reference/REDACTIONS.md` — record of every secret/PII replacement applied during build
+
+## Surface
+This skill was recorded on the **{{ draft.surface }}** surface.
