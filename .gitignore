@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.swp
+.DS_Store
+
+# Recording outputs and generated skills land here by default — don't check them in.
+# Anchored at repo root so tests/fixtures/recordings/ stays tracked.
+/recordings/
+/out/
+*.local.json
