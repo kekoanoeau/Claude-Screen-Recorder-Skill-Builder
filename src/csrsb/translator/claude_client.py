@@ -1,15 +1,26 @@
 """Anthropic SDK wrapper for skill synthesis.
 
-Phase 1 uses one model — Claude Opus 4.7 — and one prompt: ``synthesize_skill``.
-The system prompt is cached so repeated builds during development hit the cache.
+Phase 2 runs two passes:
 
-Opus 4.7 specifics applied here:
-- Adaptive thinking (``thinking={"type": "adaptive"}``); ``budget_tokens`` is removed
-- ``output_config.effort = "high"`` for synthesis quality
-- No ``temperature`` / ``top_p`` / ``top_k`` (all 400 on Opus 4.7)
-- ``output_config.format = json_schema`` to constrain the response shape
-- Streaming with ``messages.stream(...).get_final_message()`` to avoid SDK timeouts
-  at the higher ``max_tokens`` we need for full skill drafts
+1. **Per-segment labeling** with **Claude Haiku 4.5** — each segment + its
+   boundary screenshot becomes a compact ``StepLabel``.
+2. **Whole-skill synthesis** with **Claude Opus 4.7** — Opus consumes the
+   labels (not the raw events) plus a few representative screenshots, and
+   emits the full ``SkillDraft``.
+
+Splitting the work this way keeps Opus's context small and lets us spend
+high-effort tokens on the part that benefits most from them — the final
+narrative-shaped output.
+
+Model specifics applied:
+
+- Opus 4.7 — adaptive thinking, ``effort="high"``, no sampling params
+- Haiku 4.5 — no ``effort`` (errors on Haiku), no thinking; one-shot label call
+- ``output_config.format = json_schema`` on both
+- ``cache_control: ephemeral`` on each system prompt (separate cache entries
+  per prompt — placement matches the prompt-caching skill guidance)
+- Streaming with ``messages.stream(...).get_final_message()`` to dodge the
+  SDK's HTTP timeout guard at the higher ``max_tokens`` we use for synthesis
 """
 
 from __future__ import annotations
@@ -21,6 +32,11 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Protocol
 
 from csrsb.schema import Recording, SkillDraft
+from csrsb.translator.prompts.label_step import (
+    LABEL_SYSTEM_PROMPT,
+    STEP_LABEL_JSON_SCHEMA,
+    build_user_message as build_label_user_message,
+)
 from csrsb.translator.prompts.synthesize_skill import (
     SKILL_DRAFT_JSON_SCHEMA,
     SYNTHESIZE_SYSTEM_PROMPT,
@@ -28,14 +44,27 @@ from csrsb.translator.prompts.synthesize_skill import (
 )
 from csrsb.translator.segment import Segment
 
-DEFAULT_MODEL = "claude-opus-4-7"
+DEFAULT_SYNTH_MODEL = "claude-opus-4-7"
+DEFAULT_LABEL_MODEL = "claude-haiku-4-5"
 DEFAULT_MAX_TOKENS = 16000
+DEFAULT_LABEL_MAX_TOKENS = 1024
 DEFAULT_EFFORT = "high"
-MAX_SCREENSHOTS = 8  # Cap images sent to Claude — bigger payloads hurt latency more than quality
+MAX_SCREENSHOTS = 8  # Cap images sent to Opus — bigger payloads hurt latency more than quality
+
+
+@dataclass
+class StepLabel:
+    """Result of the per-segment labeling pass."""
+
+    segment_index: int
+    intent: str
+    target_description: Optional[str]
+    expected_outcome: Optional[str]
+    confidence: str
 
 
 class ClaudeClient(Protocol):
-    """Subset of ``anthropic.Anthropic`` we depend on. Lets tests inject a fake."""
+    """Subset we depend on. Lets tests inject a fake."""
 
     def synthesize(
         self,
@@ -62,17 +91,23 @@ class AnthropicClient:
     def __init__(
         self,
         *,
-        model: str = DEFAULT_MODEL,
+        synth_model: str = DEFAULT_SYNTH_MODEL,
+        label_model: str = DEFAULT_LABEL_MODEL,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        label_max_tokens: int = DEFAULT_LABEL_MAX_TOKENS,
         effort: str = DEFAULT_EFFORT,
         api_key: Optional[str] = None,
+        skip_labeling: bool = False,
     ) -> None:
         import anthropic  # Lazy import — keeps fakes free of the dependency
 
         self._client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
-        self._model = model
+        self._synth_model = synth_model
+        self._label_model = label_model
         self._max_tokens = max_tokens
+        self._label_max_tokens = label_max_tokens
         self._effort = effort
+        self._skip_labeling = skip_labeling
 
     def synthesize(
         self,
@@ -81,11 +116,15 @@ class AnthropicClient:
         screenshots_root: Path,
     ) -> SkillDraft:
         summaries = _summarize_segments(segments)
-        payload = _build_payload(recording, summaries)
+        labels: list[StepLabel] = []
+        if not self._skip_labeling:
+            labels = self._label_segments(summaries, screenshots_root)
+
+        payload = _build_payload(recording, summaries, labels)
         user_blocks = _build_user_content(payload, summaries, screenshots_root)
 
         with self._client.messages.stream(
-            model=self._model,
+            model=self._synth_model,
             max_tokens=self._max_tokens,
             system=[
                 {
@@ -113,6 +152,70 @@ class AnthropicClient:
             {**json.loads(text), "surface": recording.surface}
         )
 
+    def _label_segments(
+        self,
+        summaries: list[_SegmentSummary],
+        screenshots_root: Path,
+    ) -> list[StepLabel]:
+        labels: list[StepLabel] = []
+        for summary in summaries:
+            label = self._label_one_segment(summary, screenshots_root)
+            if label is not None:
+                labels.append(label)
+        return labels
+
+    def _label_one_segment(
+        self,
+        summary: _SegmentSummary,
+        screenshots_root: Path,
+    ) -> Optional[StepLabel]:
+        segment_payload = {
+            "index": summary.index,
+            "duration_ms": summary.duration_ms,
+            "events": summary.events,
+        }
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": build_label_user_message(json.dumps(segment_payload))}
+        ]
+        screenshot = _maybe_image_block(summary.boundary_screenshot, screenshots_root)
+        if screenshot is not None:
+            content.append(screenshot)
+
+        with self._client.messages.stream(
+            model=self._label_model,
+            max_tokens=self._label_max_tokens,
+            system=[
+                {
+                    "type": "text",
+                    "text": LABEL_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": content}],
+            output_config={
+                "format": {
+                    "type": "json_schema",
+                    "schema": STEP_LABEL_JSON_SCHEMA,
+                },
+            },
+        ) as stream:
+            final = stream.get_final_message()
+
+        text = next((b.text for b in final.content if b.type == "text"), None)
+        if text is None:
+            return None
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return StepLabel(
+            segment_index=summary.index,
+            intent=data["intent"],
+            target_description=data.get("target_description"),
+            expected_outcome=data.get("expected_outcome"),
+            confidence=data.get("confidence", "low"),
+        )
+
 
 def _summarize_segments(segments: Iterable[Segment]) -> list[_SegmentSummary]:
     out: list[_SegmentSummary] = []
@@ -136,6 +239,7 @@ def _summarize_segments(segments: Iterable[Segment]) -> list[_SegmentSummary]:
                         "target_url": e.target.url,
                         "target_text": e.target.selector_alternatives.text,
                         "target_role": e.target.selector_alternatives.role_name,
+                        "accessible_name": e.target.accessible_name,
                         "screenshot_path": e.screenshot_path,
                     }
                     for e in events
@@ -146,7 +250,12 @@ def _summarize_segments(segments: Iterable[Segment]) -> list[_SegmentSummary]:
     return out
 
 
-def _build_payload(recording: Recording, summaries: list[_SegmentSummary]) -> dict[str, Any]:
+def _build_payload(
+    recording: Recording,
+    summaries: list[_SegmentSummary],
+    labels: list[StepLabel],
+) -> dict[str, Any]:
+    label_by_index = {l.segment_index: l for l in labels}
     return {
         "surface": recording.surface,
         "metadata": recording.metadata.model_dump(exclude_none=True),
@@ -162,6 +271,16 @@ def _build_payload(recording: Recording, summaries: list[_SegmentSummary]) -> di
                 "duration_ms": s.duration_ms,
                 "event_count": s.event_count,
                 "events": s.events,
+                "label": (
+                    {
+                        "intent": label_by_index[s.index].intent,
+                        "target_description": label_by_index[s.index].target_description,
+                        "expected_outcome": label_by_index[s.index].expected_outcome,
+                        "confidence": label_by_index[s.index].confidence,
+                    }
+                    if s.index in label_by_index
+                    else None
+                ),
             }
             for s in summaries
         ],
@@ -173,7 +292,9 @@ def _build_user_content(
     summaries: list[_SegmentSummary],
     screenshots_root: Path,
 ) -> list[dict[str, Any]]:
-    blocks: list[dict[str, Any]] = [{"type": "text", "text": build_user_message(json.dumps(payload, indent=2))}]
+    blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": build_user_message(json.dumps(payload, indent=2))}
+    ]
     seen: set[str] = set()
     image_count = 0
     for summary in summaries:
@@ -182,29 +303,32 @@ def _build_user_content(
         path = summary.boundary_screenshot
         if not path or path in seen:
             continue
-        full = screenshots_root / path
-        if not full.exists():
-            continue
-        try:
-            data = base64.standard_b64encode(full.read_bytes()).decode("ascii")
-        except OSError:
+        block = _maybe_image_block(path, screenshots_root)
+        if block is None:
             continue
         blocks.append(
-            {
-                "type": "text",
-                "text": f"Screenshot for segment {summary.index} ({path}):",
-            }
+            {"type": "text", "text": f"Screenshot for segment {summary.index} ({path}):"}
         )
-        blocks.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": data,
-                },
-            }
-        )
+        blocks.append(block)
         seen.add(path)
         image_count += 1
     return blocks
+
+
+def _maybe_image_block(
+    relative_path: Optional[str],
+    screenshots_root: Path,
+) -> Optional[dict[str, Any]]:
+    if not relative_path:
+        return None
+    full = screenshots_root / relative_path
+    if not full.exists():
+        return None
+    try:
+        data = base64.standard_b64encode(full.read_bytes()).decode("ascii")
+    except OSError:
+        return None
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": data},
+    }

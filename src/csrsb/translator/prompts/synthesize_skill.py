@@ -17,6 +17,10 @@ pixel coordinates or selectors.
 
 You will be given:
 - A list of segmented user actions (clicks, keystrokes typed as strings, scrolls, navigation)
+- A pre-computed `label` per segment (intent, target_description, expected_outcome, confidence)
+  produced by a smaller model. Treat these as strong hints, not gospel — if the events
+  and screenshot contradict the label, trust the events. If a label has confidence "low",
+  weight it less.
 - Optional screenshots showing the state at segment boundaries
 - Optional metadata: OS, browser, viewport, an intent hint from the user
 

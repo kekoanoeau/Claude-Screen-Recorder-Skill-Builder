@@ -23,6 +23,8 @@ from csrsb.builder import write as write_skill
 from csrsb.ingest import load_desktop_recording
 from csrsb.installer import install as install_skill
 from csrsb.recorders.desktop import DesktopSession, RecorderConfig
+from csrsb.schema import Recording
+from csrsb.server import run as run_server
 from csrsb.translator import BuildOptions, build as run_pipeline
 
 
@@ -100,8 +102,12 @@ def record(out_dir: Path, stop_chord: str, intent: Optional[str], no_screenshots
     help="Replace an existing skill directory.",
 )
 def build(recording_dir: Path, out_dir: Path, allow_pii: bool, overwrite: bool) -> None:
-    """Translate a recording into a Claude Code Skill."""
-    recording = load_desktop_recording(recording_dir)
+    """Translate a recording into a Claude Code Skill.
+
+    Auto-detects the surface from the recording itself — desktop and browser
+    payloads share the same ``recording.json`` shape after ingest.
+    """
+    recording = Recording.from_dir(recording_dir)
     result = run_pipeline(
         recording,
         recording_dir=recording_dir,
@@ -127,6 +133,31 @@ def build(recording_dir: Path, out_dir: Path, allow_pii: bool, overwrite: bool) 
         click.echo(
             f"⚠ {n} redaction(s) applied — review {skill_dir / 'reference' / 'REDACTIONS.md'}"
         )
+
+
+@main.command()
+@click.option(
+    "--out",
+    "out_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    required=True,
+    help="Directory to write incoming recordings into.",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=7778,
+    show_default=True,
+    help="Localhost port to listen on. The browser extension defaults to this port.",
+)
+def serve(out_dir: Path, port: int) -> None:
+    """Receive recording uploads from the browser extension.
+
+    Bound to 127.0.0.1 only — the upload contains screenshots that should not
+    leave your machine.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_server(out_dir, port=port)
 
 
 @main.command()

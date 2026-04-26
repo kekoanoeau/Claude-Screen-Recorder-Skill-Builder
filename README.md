@@ -2,17 +2,23 @@
 
 Record yourself doing a task on your desktop or in a browser, and turn the recording into a [Claude Code Skill](https://platform.claude.com/docs/en/agents-and-tools/skills) so Claude can do it for you next time.
 
-## Status — Phase 1 (desktop MVP)
+## Status — Phase 2 (desktop + browser end-to-end)
 
-Phase 1 is implemented. It supports the full desktop loop:
+Phases 1 and 2 are implemented. The desktop loop ships as before, plus a Manifest V3 browser extension, a localhost upload receiver, and a two-pass translator (Haiku 4.5 labels each segment, Opus 4.7 synthesises the skill):
 
 ```
-csrsb record  →  recording.json + screenshots
-csrsb build   →  SKILL.md + reference/  (Claude Opus 4.7 synthesis)
-csrsb install →  ~/.claude/skills/<name>/  (or .claude/skills/<name>/)
+# Desktop
+csrsb record           →  recording.json + screenshots
+csrsb build            →  SKILL.md + reference/
+csrsb install          →  ~/.claude/skills/<name>/
+
+# Browser
+csrsb serve --out DIR  →  receives uploads from the Chrome/Edge extension
+csrsb build DIR        →  same translator pipeline as desktop
+csrsb install …        →  same install path as desktop
 ```
 
-The browser extension, the multi-signal segmenter, drag/upload/clipboard/focus events, OCR-based screenshot redaction, and the deterministic-replay script generator land in Phases 2–4 (see [the plan](#roadmap)).
+OCR-based screenshot redaction, the post-LLM secret check, the deterministic-replay script generator, and `csrsb describe` land in Phases 3–4 (see [the plan](#roadmap)).
 
 ## What gets generated
 
@@ -66,9 +72,14 @@ csrsb install /tmp/skills/open-calculator-and-add --scope user
 | Command | What it does |
 |---|---|
 | `csrsb record --out DIR [--stop-chord ctrl+shift+esc] [--intent "..."] [--no-screenshots]` | Records a desktop session. Captures clicks, scrolls, keystrokes (collapsed into typed strings), and a screenshot per click. Stops when the stop chord fires. |
-| `csrsb build RECORDING_DIR --out DIR [--allow-pii] [--overwrite]` | Runs compress → segment → redact → synthesize via Claude Opus 4.7. Writes `<out>/<name>/`. Warns about any redactions found unless `--allow-pii`. |
+| `csrsb serve --out DIR [--port 7778]` | Listens on localhost for uploads from the browser extension. Splits inline base64 screenshots into PNG files and writes a recording.json under `<out>/browser-<timestamp>/`. |
+| `csrsb build RECORDING_DIR --out DIR [--allow-pii] [--overwrite]` | Runs compress → multi-signal segment → redact → Haiku label → Opus synthesize. Auto-detects desktop vs. browser surface from the recording. Writes `<out>/<name>/`. |
 | `csrsb install SKILL_DIR [--scope user|project] [--overwrite]` | Copies the skill to `~/.claude/skills/` (default) or `./.claude/skills/`. |
 | `csrsb validate SKILL_DIR` | Lints frontmatter (`name` kebab-case, `description` ≤ 1024 chars) and image references. |
+
+### Browser extension
+
+Living under `recorders/browser-extension/`. Load it as an unpacked extension (`chrome://extensions/` → Developer mode → Load unpacked). The popup provides Start / Stop / Add note. Events are captured via capturing-phase listeners; password fields and `autocomplete=one-time-code|cc-*` fields are skipped at the source. Screenshots are taken via `chrome.tabs.captureVisibleTab` from the background service worker; an offscreen document keepalive prevents the worker from being torn down between events. Recordings either upload to `csrsb serve` or download as a JSON file with inline base64 screenshots.
 
 ### Privacy posture
 
@@ -79,19 +90,29 @@ Phase 3 will add OCR-based screenshot redaction and a post-LLM secret-leak check
 ## Architecture
 
 ```
-csrsb/
+src/csrsb/
 ├── recorders/desktop/    # pynput + mss capture, lifecycle, hotkey
 ├── ingest/               # raw recorder dump -> Recording (uniform across surfaces)
-├── translator/           # compress -> segment -> redact -> Claude synthesis
-│   ├── prompts/          # system prompt + JSON schema for SkillDraft
+│   ├── desktop.py        # thin loader (the desktop recorder writes the canonical shape)
+│   └── browser.py        # validate + renumber + Recording.from_dict for extension uploads
+├── server.py             # csrsb serve — localhost HTTP receiver for browser uploads
+├── translator/           # compress -> segment -> redact -> Haiku label -> Opus synth
+│   ├── prompts/          # system prompts + JSON schemas for StepLabel and SkillDraft
 │   └── templates/        # Jinja2 SKILL.md.j2 + REDACTIONS.md.j2
 ├── builder.py            # render templates, write skill dir
 ├── installer.py          # copy to ~/.claude/skills/ or ./.claude/skills/
-├── cli.py                # record | build | install | validate
+├── cli.py                # record | serve | build | install | validate
 └── schema.py             # Pydantic Recording, Event, Target, Step, SkillDraft
+
+recorders/browser-extension/   # Manifest V3 — separate dir because it ships unpacked
+├── manifest.json
+├── background.js         # service worker: event buffer, captureVisibleTab, upload
+├── content.js            # capturing-phase listeners + selector ranking + frame/shadow walk
+├── offscreen.html / offscreen.js   # keepalive for the service worker
+└── popup.html / popup.js
 ```
 
-Both recorders (desktop now, browser in Phase 2) emit the same `Recording` shape, so the translator never branches on the recording surface.
+Both recorders emit the same `Recording` shape, so the translator never branches on the recording surface.
 
 ## Develop
 
@@ -104,9 +125,9 @@ The test suite ships with a desktop fixture recording (`tests/fixtures/recording
 
 ## Roadmap
 
-- **Phase 1 (this release)** — desktop recorder, single-pass Opus synthesis, regex redaction, end-to-end CLI
-- **Phase 2** — Manifest V3 browser extension + `csrsb serve` HTTP receiver, multi-tab/iframe/shadow-DOM, Haiku per-step labeling, multi-signal segmenter
-- **Phase 3** — drag/drop, file_upload, clipboard, hover-with-dwell, focus changes, perceptual-hash boundaries, OCR-based screenshot redaction, post-LLM secret check, optional `--with-script` deterministic replay generator
+- **Phase 1** — desktop recorder, single-pass Opus synthesis, regex redaction, end-to-end CLI ✅
+- **Phase 2 (this release)** — Manifest V3 browser extension + `csrsb serve` HTTP receiver, frame/shadow walk + selector ranking, Haiku per-step labeling pass, multi-signal weighted segmenter ✅
+- **Phase 3** — drag/drop, clipboard, hover-with-dwell, focus changes, perceptual-hash boundaries, OCR-based screenshot redaction, post-LLM secret check, optional `--with-script` deterministic replay generator
 - **Phase 4** — `csrsb describe` interactive description refiner, prompt-cache hit metrics, conflict detection on install, optional face-blur
 
 ## License
