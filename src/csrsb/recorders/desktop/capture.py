@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import platform
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -49,6 +50,80 @@ def take_screenshot(out_path: Path) -> tuple[int, int]:
         img.save(buf, format="PNG", optimize=True)
         out_path.write_bytes(buf.getvalue())
         return (raw.size[0], raw.size[1])
+
+
+def average_hash(image_path: Path, *, side: int = 8) -> Optional[int]:
+    """Compute an aHash (Average Hash) of an image as a 64-bit int.
+
+    Returns ``None`` if Pillow can't read the image. ``side=8`` means a 64-bit
+    hash; Hamming distance between two hashes is the count of differing bits,
+    so a screen-change boundary is roughly ``hamming >= 12`` for 64 bits.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        with Image.open(image_path) as raw:
+            small = raw.convert("L").resize((side, side))
+            # Pillow 14 removes ``getdata``; ``tobytes`` is the supported path
+            # and gives us the raw 8-bit luminance values directly.
+            pixels = list(small.tobytes())
+    except OSError:
+        return None
+    avg = sum(pixels) / len(pixels)
+    bits = 0
+    for i, p in enumerate(pixels):
+        if p >= avg:
+            bits |= 1 << i
+    return bits
+
+
+def hamming_distance(a: int, b: int) -> int:
+    """Number of differing bits between two integers."""
+    return bin(a ^ b).count("1")
+
+
+def frontmost_window() -> Optional[dict[str, Any]]:
+    """Best-effort lookup of the focused application's title and bundle.
+
+    macOS uses AppleScript via ``osascript`` (no extra deps); Linux uses
+    ``xdotool`` if available. Windows is not implemented in Phase 3 — falls
+    back to ``None`` and the recorder skips focus-change emission.
+    """
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            script = (
+                'tell application "System Events" to set frontApp to name of '
+                'first application process whose frontmost is true'
+            )
+            out = subprocess.check_output(
+                ["osascript", "-e", script],
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+            )
+            return {"app_name": out.decode().strip(), "window_title": None}
+        if system == "Linux":
+            try:
+                wid = subprocess.check_output(
+                    ["xdotool", "getactivewindow"],
+                    stderr=subprocess.DEVNULL,
+                    timeout=1.0,
+                ).decode().strip()
+                if not wid:
+                    return None
+                title = subprocess.check_output(
+                    ["xdotool", "getwindowname", wid],
+                    stderr=subprocess.DEVNULL,
+                    timeout=1.0,
+                ).decode().strip()
+                return {"app_name": None, "window_title": title}
+            except FileNotFoundError:
+                return None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return None
 
 
 class InputListener:

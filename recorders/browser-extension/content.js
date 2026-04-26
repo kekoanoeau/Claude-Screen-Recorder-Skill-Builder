@@ -36,6 +36,31 @@
   document.addEventListener("keydown", onKeydown, true);
   document.addEventListener("scroll", onScroll, true);
 
+  // Drag/drop: track the start element, emit one combined event on drop.
+  let dragStart = null;
+  document.addEventListener("dragstart", onDragStart, true);
+  document.addEventListener("drop", onDrop, true);
+
+  // Clipboard: never log the actual text. Record length + sha256 + a redacted flag
+  // so the translator can see "user pasted 32 chars from somewhere" without
+  // exposing the contents.
+  document.addEventListener("copy", onClipboard("copy"), true);
+  document.addEventListener("paste", onClipboard("paste"), true);
+
+  // Hover-with-dwell: fire one event when the mouse rests on the same element
+  // for >=600ms. Filters out drive-by mouseovers while capturing intent like
+  // "hover to reveal a submenu, then click".
+  let hoverTarget = null;
+  let hoverTimer = null;
+  let hoverStartedAt = 0;
+  document.addEventListener("mouseover", onMouseover, true);
+  document.addEventListener("mouseout", onMouseout, true);
+
+  // Focus changes — both window-level (tab in/out of focus) and element-level
+  // when it crosses an iframe boundary.
+  window.addEventListener("focus", () => emit({ type: "focus_change", target: { url: location.href }, value: { gained: true } }));
+  window.addEventListener("blur", () => emit({ type: "focus_change", target: { url: location.href }, value: { gained: false } }));
+
   function onClick(ev) {
     if (!recording) return;
     const target = describeTarget(ev.target);
@@ -113,6 +138,92 @@
         meta: ev.metaKey,
       },
     });
+  }
+
+  function onDragStart(ev) {
+    if (!recording) return;
+    dragStart = describeTarget(ev.target);
+    emit({
+      type: "drag",
+      target: dragStart,
+      value: { x: ev.clientX, y: ev.clientY },
+    });
+  }
+
+  function onDrop(ev) {
+    if (!recording) return;
+    const dropTarget = describeTarget(ev.target);
+    emit({
+      type: "drop",
+      target: dropTarget,
+      value: {
+        x: ev.clientX,
+        y: ev.clientY,
+        from: dragStart || null,
+      },
+    });
+    dragStart = null;
+  }
+
+  function onClipboard(kind) {
+    return async (ev) => {
+      if (!recording) return;
+      // Read the data without logging it. Hash for a stable "same content?"
+      // signal across paste events.
+      let length = 0;
+      let sha256 = null;
+      try {
+        const text =
+          (ev.clipboardData && ev.clipboardData.getData("text/plain")) || "";
+        length = text.length;
+        if (length > 0 && window.crypto && crypto.subtle) {
+          const buf = new TextEncoder().encode(text);
+          const digest = await crypto.subtle.digest("SHA-256", buf);
+          sha256 = Array.from(new Uint8Array(digest))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("");
+        }
+      } catch (_) {
+        // ev.clipboardData unavailable — emit a length=0 marker so the
+        // translator still sees that *something* was copied/pasted.
+      }
+      emit({
+        type: "clipboard",
+        target: describeTarget(ev.target),
+        value: { kind, length, sha256, redacted: true },
+      });
+    };
+  }
+
+  function onMouseover(ev) {
+    if (!recording) return;
+    if (hoverTarget === ev.target) return;
+    cancelHoverTimer();
+    hoverTarget = ev.target;
+    hoverStartedAt = Date.now();
+    hoverTimer = setTimeout(() => {
+      if (!hoverTarget) return;
+      const dwell = Date.now() - hoverStartedAt;
+      emit({
+        type: "hover",
+        target: describeTarget(hoverTarget),
+        value: { dwell_ms: dwell },
+      });
+    }, 600);
+  }
+
+  function onMouseout(ev) {
+    if (!recording) return;
+    if (hoverTarget !== ev.target) return;
+    cancelHoverTimer();
+    hoverTarget = null;
+  }
+
+  function cancelHoverTimer() {
+    if (hoverTimer) {
+      clearTimeout(hoverTimer);
+      hoverTimer = null;
+    }
   }
 
   let scrollDebounce = null;

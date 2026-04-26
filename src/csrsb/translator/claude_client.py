@@ -37,11 +37,17 @@ from csrsb.translator.prompts.label_step import (
     STEP_LABEL_JSON_SCHEMA,
     build_user_message as build_label_user_message,
 )
+from csrsb.translator.prompts.secret_check import (
+    SECRET_CHECK_JSON_SCHEMA,
+    SECRET_CHECK_SYSTEM_PROMPT,
+    build_user_message as build_secret_check_message,
+)
 from csrsb.translator.prompts.synthesize_skill import (
     SKILL_DRAFT_JSON_SCHEMA,
     SYNTHESIZE_SYSTEM_PROMPT,
     build_user_message,
 )
+from csrsb.translator.redact import SecretCheckFinding
 from csrsb.translator.segment import Segment
 
 DEFAULT_SYNTH_MODEL = "claude-opus-4-7"
@@ -63,6 +69,14 @@ class StepLabel:
     confidence: str
 
 
+@dataclass
+class SecretCheckResult:
+    """Result of the post-LLM secret-check pass."""
+
+    verdict: str  # "clean" | "needs_review"
+    findings: list[SecretCheckFinding]
+
+
 class ClaudeClient(Protocol):
     """Subset we depend on. Lets tests inject a fake."""
 
@@ -72,6 +86,9 @@ class ClaudeClient(Protocol):
         segments: list[Segment],
         screenshots_root: Path,
     ) -> SkillDraft:
+        ...
+
+    def check_secrets(self, skill_md_text: str) -> SecretCheckResult:
         ...
 
 
@@ -163,6 +180,58 @@ class AnthropicClient:
             if label is not None:
                 labels.append(label)
         return labels
+
+    def check_secrets(self, skill_md_text: str) -> SecretCheckResult:
+        """Run the post-LLM secret-check pass over the rendered SKILL.md.
+
+        Uses Haiku 4.5 with structured output. Conservative — we'd rather show
+        the user a false-positive list than ship a leak.
+        """
+        with self._client.messages.stream(
+            model=self._label_model,
+            max_tokens=2048,
+            system=[
+                {
+                    "type": "text",
+                    "text": SECRET_CHECK_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": build_secret_check_message(skill_md_text)},
+                    ],
+                }
+            ],
+            output_config={
+                "format": {
+                    "type": "json_schema",
+                    "schema": SECRET_CHECK_JSON_SCHEMA,
+                },
+            },
+        ) as stream:
+            final = stream.get_final_message()
+
+        text = next((b.text for b in final.content if b.type == "text"), None)
+        if text is None:
+            return SecretCheckResult(verdict="clean", findings=[])
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return SecretCheckResult(verdict="clean", findings=[])
+        return SecretCheckResult(
+            verdict=data.get("verdict", "clean"),
+            findings=[
+                SecretCheckFinding(
+                    matched_text=f["matched_text"],
+                    kind=f["kind"],
+                    reason=f["reason"],
+                )
+                for f in data.get("findings", [])
+            ],
+        )
 
     def _label_one_segment(
         self,

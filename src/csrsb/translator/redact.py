@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from csrsb.schema import Event, Recording
 
@@ -47,9 +47,25 @@ class Redaction:
 
 
 @dataclass
+class SecretCheckFinding:
+    """One leak flagged by the post-LLM secret-check pass.
+
+    Distinct from ``Redaction``: a Redaction is a substitution we *applied*; a
+    Finding is a leak we *detected* in the rendered draft. The CLI groups them
+    in REDACTIONS.md so the user sees both lists side by side.
+    """
+
+    matched_text: str
+    kind: str
+    reason: str
+
+
+@dataclass
 class RedactionLog:
     redactions: list[Redaction] = field(default_factory=list)
     counters: dict[str, int] = field(default_factory=dict)
+    secret_findings: list[SecretCheckFinding] = field(default_factory=list)
+    secret_check_verdict: Optional[str] = None  # "clean" | "needs_review" | None if skipped
 
     def next_placeholder(self, kind: str) -> str:
         n = self.counters.get(kind, 0) + 1

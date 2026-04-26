@@ -6,6 +6,7 @@ from pathlib import Path
 from csrsb.builder import write as write_skill
 from csrsb.ingest import load_desktop_recording
 from csrsb.schema import Recording, SkillDraft, Step
+from csrsb.translator.claude_client import SecretCheckResult
 from csrsb.translator.segment import Segment
 from csrsb.translator import BuildOptions, build as run_pipeline
 
@@ -19,6 +20,9 @@ class _FakeClaude:
     """
 
     captured: dict | None = None
+
+    def check_secrets(self, skill_md_text: str) -> SecretCheckResult:
+        return SecretCheckResult(verdict="clean", findings=[])
 
     def synthesize(
         self,

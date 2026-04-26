@@ -13,10 +13,14 @@ from csrsb.builder import write as write_skill
 from csrsb.cli import _validate
 from csrsb.schema import Recording, SkillDraft, Step
 from csrsb.translator import BuildOptions, build as run_pipeline
+from csrsb.translator.claude_client import SecretCheckResult
 from csrsb.translator.segment import Segment
 
 
 class _FakeClaude:
+    def check_secrets(self, skill_md_text: str) -> SecretCheckResult:
+        return SecretCheckResult(verdict="clean", findings=[])
+
     def synthesize(
         self,
         recording: Recording,

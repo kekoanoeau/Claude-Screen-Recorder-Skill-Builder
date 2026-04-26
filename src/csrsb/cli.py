@@ -60,7 +60,29 @@ def main() -> None:
     default=False,
     help="Skip screenshot capture on click (smaller output, lower-quality skill).",
 )
-def record(out_dir: Path, stop_chord: str, intent: Optional[str], no_screenshots: bool) -> None:
+@click.option(
+    "--ocr-redact",
+    is_flag=True,
+    default=False,
+    help=(
+        "OCR each screenshot and blur regions matching known secret patterns. "
+        "Requires pytesseract + the tesseract binary; silently no-ops if either is missing."
+    ),
+)
+@click.option(
+    "--no-focus-poll",
+    is_flag=True,
+    default=False,
+    help="Skip OS-level focus polling (no focus_change events).",
+)
+def record(
+    out_dir: Path,
+    stop_chord: str,
+    intent: Optional[str],
+    no_screenshots: bool,
+    ocr_redact: bool,
+    no_focus_poll: bool,
+) -> None:
     """Start a desktop recording. Press the stop chord to finish."""
     chord = frozenset(part.strip().lower() for part in stop_chord.split("+") if part.strip())
     if not chord:
@@ -70,6 +92,8 @@ def record(out_dir: Path, stop_chord: str, intent: Optional[str], no_screenshots
         stop_chord=chord,
         user_intent_hint=intent,
         screenshot_on_click=not no_screenshots,
+        ocr_redact=ocr_redact,
+        poll_focus=not no_focus_poll,
     )
     session = DesktopSession(config)
     click.echo(f"Recording to {out_dir}. Press {' + '.join(sorted(chord))} to stop.")
@@ -93,7 +117,25 @@ def record(out_dir: Path, stop_chord: str, intent: Optional[str], no_screenshots
     "--allow-pii",
     is_flag=True,
     default=False,
-    help="Suppress the warning if the redaction sweep matched any patterns.",
+    help=(
+        "Continue the build even if the post-LLM secret check flags potential leaks. "
+        "Findings are still written to REDACTIONS.md."
+    ),
+)
+@click.option(
+    "--skip-secret-check",
+    is_flag=True,
+    default=False,
+    help="Skip the post-LLM secret-check pass entirely (saves one Haiku call).",
+)
+@click.option(
+    "--with-script",
+    is_flag=True,
+    default=False,
+    help=(
+        "Also emit scripts/replay.py — a best-effort deterministic playback script "
+        "(Playwright for browser recordings, pyautogui for desktop)."
+    ),
 )
 @click.option(
     "--overwrite",
@@ -101,18 +143,35 @@ def record(out_dir: Path, stop_chord: str, intent: Optional[str], no_screenshots
     default=False,
     help="Replace an existing skill directory.",
 )
-def build(recording_dir: Path, out_dir: Path, allow_pii: bool, overwrite: bool) -> None:
+def build(
+    recording_dir: Path,
+    out_dir: Path,
+    allow_pii: bool,
+    skip_secret_check: bool,
+    with_script: bool,
+    overwrite: bool,
+) -> None:
     """Translate a recording into a Claude Code Skill.
 
     Auto-detects the surface from the recording itself — desktop and browser
     payloads share the same ``recording.json`` shape after ingest.
     """
+    from csrsb.translator.pipeline import SecretsDetectedError
+
     recording = Recording.from_dir(recording_dir)
-    result = run_pipeline(
-        recording,
-        recording_dir=recording_dir,
-        options=BuildOptions(allow_pii=allow_pii),
-    )
+    try:
+        result = run_pipeline(
+            recording,
+            recording_dir=recording_dir,
+            options=BuildOptions(
+                allow_pii=allow_pii,
+                skip_secret_check=skip_secret_check,
+            ),
+        )
+    except SecretsDetectedError as exc:
+        click.echo(f"✗ {exc}", err=True)
+        click.echo("Re-run with --allow-pii to continue (the findings still go in REDACTIONS.md).", err=True)
+        sys.exit(1)
 
     skill_root = Path(out_dir) / result.draft.name
     if skill_root.exists() and overwrite:
@@ -126,12 +185,18 @@ def build(recording_dir: Path, out_dir: Path, allow_pii: bool, overwrite: bool) 
         recording_dir=recording_dir,
         redaction_log=result.redaction_log,
         out_dir=out_dir,
+        with_script=with_script,
     )
     click.echo(f"Skill written to {skill_dir}")
     if result.redaction_log.redactions:
         n = len(result.redaction_log.redactions)
         click.echo(
             f"⚠ {n} redaction(s) applied — review {skill_dir / 'reference' / 'REDACTIONS.md'}"
+        )
+    if result.redaction_log.secret_findings:
+        n = len(result.redaction_log.secret_findings)
+        click.echo(
+            f"⚠ post-LLM secret check flagged {n} potential leak(s) — review {skill_dir / 'reference' / 'REDACTIONS.md'}"
         )
 
 

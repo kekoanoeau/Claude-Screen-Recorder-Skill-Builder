@@ -10,6 +10,7 @@ from jinja2 import Environment
 
 from csrsb.schema import Recording, SkillDraft
 from csrsb.translator.redact import RedactionLog
+from csrsb.translator.scripts import generate_replay_script
 
 
 def _env() -> Environment:
@@ -36,11 +37,13 @@ def write(
     recording_dir: Path,
     redaction_log: RedactionLog,
     out_dir: Path,
+    with_script: bool = False,
 ) -> Path:
     """Write the skill to ``<out_dir>/<draft.name>/``. Returns that path.
 
     Raises ``FileExistsError`` if the target exists — caller decides whether to
-    overwrite.
+    overwrite. ``with_script`` enables the deterministic replay scaffold under
+    ``scripts/replay.py`` (Playwright for browser, pyautogui for desktop).
     """
     skill_dir = Path(out_dir) / draft.name
     if skill_dir.exists():
@@ -62,5 +65,12 @@ def write(
     src_screens = Path(recording_dir) / "screenshots"
     if src_screens.exists():
         shutil.copytree(src_screens, reference_dir / "screenshots")
+
+    if with_script:
+        scripts_dir = skill_dir / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "replay.py").write_text(
+            generate_replay_script(recording), encoding="utf-8"
+        )
 
     return skill_dir

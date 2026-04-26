@@ -1,8 +1,15 @@
 # Redactions applied during skill build
 
-This file lists every value the translator scrubbed from the recording before
-sending it to Claude. Review before installing the skill.
+Two passes ran:
 
+1. **Regex/entropy scrub** of the raw recording before it was sent to Claude.
+   Sensitive values are replaced with typed placeholders.
+2. **Post-LLM secret check** over the rendered SKILL.md, run by Haiku 4.5 to
+   catch anything the regex pass missed.
+
+Review both lists before installing the skill.
+
+## 1. Regex/entropy redactions
 {% if log.redactions %}
 | Event | Placeholder | Kind | Original length |
 |---|---|---|---|
@@ -13,6 +20,21 @@ sending it to Claude. Review before installing the skill.
 _No redactions were applied._
 {% endif %}
 
-If a placeholder above looks like it should not have been redacted (false positive),
-edit the source recording at `reference/original_recording.json` and run
-`csrsb build` again with `--allow-pii` if you accept the risk.
+## 2. Post-LLM secret check
+{% if log.secret_check_verdict is none %}
+_The post-LLM secret check was skipped (``--skip-secret-check`` or fake client)._
+{% elif log.secret_findings %}
+Verdict: **{{ log.secret_check_verdict }}**
+
+| Match | Kind | Reason |
+|---|---|---|
+{% for f in log.secret_findings -%}
+| `{{ f.matched_text }}` | {{ f.kind }} | {{ f.reason }} |
+{% endfor %}
+
+If a match above is a false positive, re-run ``csrsb build`` with ``--allow-pii``.
+If it is real, edit ``reference/original_recording.json``, delete the
+generated skill directory, and rerun.
+{% else %}
+Verdict: **{{ log.secret_check_verdict }}** — no leaks detected.
+{% endif %}

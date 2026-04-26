@@ -84,6 +84,53 @@ chrome.tabs.onUpdated.addListener(async (tabId, info) => {
   }
 });
 
+chrome.tabs.onCreated.addListener(async (tab) => {
+  if (!state) await loadState();
+  if (!state) return;
+  state.events.push({
+    id: `evt_${state.events.length + 1}`,
+    ts_ms: Date.now(),
+    surface: "browser",
+    type: "tab_open",
+    target: { url: tab.url || tab.pendingUrl || null },
+    value: { tab_id: tab.id },
+  });
+  await saveState();
+});
+
+chrome.tabs.onRemoved.addListener(async (tabId, info) => {
+  if (!state) await loadState();
+  if (!state) return;
+  state.events.push({
+    id: `evt_${state.events.length + 1}`,
+    ts_ms: Date.now(),
+    surface: "browser",
+    type: "tab_close",
+    target: {},
+    value: { tab_id: tabId, window_closing: !!info.isWindowClosing },
+  });
+  await saveState();
+});
+
+chrome.tabs.onActivated.addListener(async (info) => {
+  if (!state) await loadState();
+  if (!state) return;
+  let url = null;
+  try {
+    const tab = await chrome.tabs.get(info.tabId);
+    url = tab.url || null;
+  } catch (_) {}
+  state.events.push({
+    id: `evt_${state.events.length + 1}`,
+    ts_ms: Date.now(),
+    surface: "browser",
+    type: "tab_switch",
+    target: { url },
+    value: { tab_id: info.tabId, window_id: info.windowId },
+  });
+  await saveState();
+});
+
 async function startRecording(msg) {
   if (state) throw new Error("already recording");
   state = {

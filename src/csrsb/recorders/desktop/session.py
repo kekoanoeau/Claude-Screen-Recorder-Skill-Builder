@@ -19,10 +19,14 @@ from typing import Optional
 from csrsb.recorders.desktop.capture import (
     InputListener,
     RawEvent,
+    average_hash,
     detect_os,
+    frontmost_window,
+    hamming_distance,
     now_ms,
     take_screenshot,
 )
+from csrsb.recorders.desktop.redact import redact_screenshot_file
 from csrsb.schema import (
     Annotation,
     Event,
@@ -31,6 +35,15 @@ from csrsb.schema import (
     Target,
     Viewport,
 )
+
+# Hamming distance over a 64-bit aHash above which we emit a `screen_changed`
+# segmentation marker. Tuned empirically — 12 catches new-window / app-switch /
+# major layout shifts while ignoring cursor-only deltas.
+_SCREEN_CHANGED_HAMMING_THRESHOLD = 12
+
+# How often to poll the OS for focus changes. Cheap enough at 500ms — only one
+# extra subprocess call per tick on macOS/Linux.
+_FOCUS_POLL_INTERVAL_S = 0.5
 
 
 @dataclass
@@ -47,6 +60,9 @@ class RecorderConfig:
     stop_chord: frozenset[str] = frozenset({"ctrl", "shift", "esc"})
     user_intent_hint: Optional[str] = None
     screenshot_on_click: bool = True
+    poll_focus: bool = True
+    detect_screen_changes: bool = True
+    ocr_redact: bool = False  # Opt-in: requires pytesseract + tesseract binary
 
 
 @dataclass
@@ -60,6 +76,8 @@ class _State:
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     last_screenshot_size: tuple[int, int] = (0, 0)
+    last_screen_hash: Optional[int] = None
+    last_focus: Optional[dict] = None  # {app_name, window_title}
 
 
 class DesktopSession:
@@ -72,6 +90,7 @@ class DesktopSession:
         self._stop_event = threading.Event()
         self._listener = InputListener(self._on_raw_event)
         self._screenshots_dir = Path(config.out_dir) / "screenshots"
+        self._focus_thread: Optional[threading.Thread] = None
 
     def run(self) -> Path:
         """Start recording and block until the stop chord fires.
@@ -83,10 +102,15 @@ class DesktopSession:
             self._state.started_at = datetime.now(timezone.utc)
 
         self._listener.start()
+        if self.config.poll_focus:
+            self._focus_thread = threading.Thread(target=self._focus_loop, daemon=True)
+            self._focus_thread.start()
         try:
             self._stop_event.wait()
         finally:
             self._listener.stop()
+            if self._focus_thread is not None:
+                self._focus_thread.join(timeout=1.0)
 
         with self._lock:
             self._state.ended_at = datetime.now(timezone.utc)
@@ -168,7 +192,75 @@ class DesktopSession:
             w, h = self._state.last_screenshot_size
         if (w, h) == (0, 0):
             return (None, None)
+        # Redact BEFORE the perceptual hash so blurring out a token doesn't
+        # then trigger a screen_changed event next time the same screen is
+        # captured cleanly.
+        if self.config.ocr_redact:
+            redact_screenshot_file(out)
+        if self.config.detect_screen_changes:
+            self._maybe_emit_screen_changed(out, ts)
         return (rel, Viewport(w=w, h=h))
+
+    def _maybe_emit_screen_changed(self, screenshot_path: Path, ts_ms: int) -> None:
+        """Compute aHash and, if it differs significantly from the previous frame,
+        emit a ``screen_changed`` event so the segmenter has a strong cut signal.
+        """
+        h = average_hash(screenshot_path)
+        if h is None:
+            return
+        with self._lock:
+            prev = self._state.last_screen_hash
+            self._state.last_screen_hash = h
+            if prev is None:
+                return
+            if hamming_distance(prev, h) < _SCREEN_CHANGED_HAMMING_THRESHOLD:
+                return
+            evt_id = f"evt_{self._state.next_event_id:04d}"
+            self._state.next_event_id += 1
+            self._state.events.append(
+                Event(
+                    id=evt_id,
+                    ts_ms=ts_ms,
+                    surface="desktop",
+                    type="screen_changed",
+                    value={"hamming": hamming_distance(prev, h), "hash": h},
+                )
+            )
+
+    def _focus_loop(self) -> None:
+        """Poll the OS for the focused app and emit ``focus_change`` on transitions.
+
+        Runs on a daemon thread; ``frontmost_window()`` returns ``None`` on
+        platforms we don't support, in which case this loop exits cleanly.
+        """
+        first = frontmost_window()
+        if first is None:
+            return
+        with self._lock:
+            self._state.last_focus = first
+        while not self._stop_event.wait(_FOCUS_POLL_INTERVAL_S):
+            current = frontmost_window()
+            if current is None:
+                continue
+            with self._lock:
+                if current == self._state.last_focus:
+                    continue
+                self._state.last_focus = current
+                evt_id = f"evt_{self._state.next_event_id:04d}"
+                self._state.next_event_id += 1
+                self._state.events.append(
+                    Event(
+                        id=evt_id,
+                        ts_ms=now_ms(),
+                        surface="desktop",
+                        type="focus_change",
+                        target=Target(
+                            app_name=current.get("app_name"),
+                            window_title=current.get("window_title"),
+                        ),
+                        value=current,
+                    )
+                )
 
     def _write(self) -> Path:
         with self._lock:
