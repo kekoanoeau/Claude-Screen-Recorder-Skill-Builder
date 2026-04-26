@@ -1,10 +1,16 @@
 """Ingest layer: normalize raw recorder output into the schema's ``Recording``.
 
-Phase 1 ships only the desktop ingest — the desktop recorder already writes
-the canonical shape, so ``from_dir`` is a thin loader. The browser extension
-(Phase 2) will land here too, behind a uniform interface.
+Phase 2 ships the desktop and browser ingest paths. Both run through
+``normalize`` for shared timestamp/ID handling and emit ``Recording``s
+indistinguishable to the translator.
 """
 
+from csrsb.ingest.browser import from_payload as load_browser_payload
+from csrsb.ingest.browser import from_zip as load_browser_zip
 from csrsb.ingest.desktop import load as load_desktop_recording
 
-__all__ = ["load_desktop_recording"]
+__all__ = [
+    "load_desktop_recording",
+    "load_browser_payload",
+    "load_browser_zip",
+]
